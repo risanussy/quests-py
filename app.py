@@ -1,51 +1,84 @@
-from flask import Flask, request, jsonify, session, redirect, url_for
-from flask_mysqldb import MySQL
+from flask import Flask, request, jsonify, session, redirect, url_for, send_from_directory
+from flask_sqlalchemy import SQLAlchemy
 from werkzeug.utils import secure_filename
 from flask_cors import CORS, cross_origin
+from flask_bcrypt import Bcrypt
 import os
 
 app = Flask(__name__)
 app.secret_key = "KunciRahasiaUntukSesi"  # Kunci rahasia untuk sesi
 
-@app.route('/')
-def index():
-    return "<h1>Flask API</h1>"
+# Konfigurasi SQLite
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///game_flask.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-from flask_bcrypt import check_password_hash
-from flask_bcrypt import Bcrypt
-from flask import send_from_directory
-
+db = SQLAlchemy(app)
 bcrypt = Bcrypt(app)
-
-# Konfigurasi MySQL
-app.config['MYSQL_HOST'] = '154.41.240.154'
-app.config['MYSQL_USER'] = 'u481547927_game_flask'
-app.config['MYSQL_PASSWORD'] = '@Gam31234'
-app.config['MYSQL_DB'] = 'u481547927_game_flask'
-
-mysql = MySQL(app)
 cors = CORS(app)
 
-# @app.after_request
-# def handle_options(response):
-#     response.headers["Access-Control-Allow-Origin"] = "*"
-#     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
-#     response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Requested-With"
-
-#     return response
-
-# Direktori untuk menyimpan file gambar
 UPLOAD_FOLDER = 'uploads'
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 if not os.path.exists(app.config['UPLOAD_FOLDER']):
     os.makedirs(app.config['UPLOAD_FOLDER'])
 
-# Fungsi untuk mengizinkan ekstensi file gambar
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+# Model untuk Database
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100))
+    username = db.Column(db.String(100), unique=True)
+    email = db.Column(db.String(100), unique=True)
+    password = db.Column(db.String(200))
+    saldo = db.Column(db.Integer, default=0)
+    point = db.Column(db.Integer, default=0)
+
+class Quest(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100))
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    level = db.Column(db.Integer)
+    timeout = db.Column(db.Integer)
+    created_by = db.Column(db.String(100))
+    answer = db.Column(db.String(200))
+
+class QuestImage(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    quest_id = db.Column(db.Integer, db.ForeignKey('quest.id'))
+    filename = db.Column(db.String(100))
+
+class Played(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    quest_id = db.Column(db.Integer, db.ForeignKey('quest.id'))
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    answered = db.Column(db.String(200), nullable=True)
+
+class Store(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    harga = db.Column(db.Integer)
+    nama = db.Column(db.String(100))
+    deskripsi = db.Column(db.String(200))
+    kategori = db.Column(db.String(100))
+
+class Transaction(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    store_id = db.Column(db.Integer, db.ForeignKey('store.id'))
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    status = db.Column(db.String(100))
+
+# Inisialisasi database
+@app.before_first_request
+def create_tables():
+    db.create_all()
+
+@app.route('/')
+def index():
+    return "<h1>Flask API</h1>"
 
 # Fungsi untuk melakukan login
 @app.route('/api/login', methods=['POST'])
@@ -54,11 +87,8 @@ def login():
     if request.method == 'POST':
         username = request.form['username']
         password = request.form['password']
-        cursor = mysql.connection.cursor()
-        cursor.execute("SELECT * FROM users WHERE username = %s", (username,))
-        user = cursor.fetchone()
-        cursor.close()
-        if user and bcrypt.check_password_hash(user[4], password):
+        user = User.query.filter_by(username=username).first()
+        if user and bcrypt.check_password_hash(user.password, password):
             response = jsonify({'message': 'Login successful', 'username': username})
             response.headers['Cache-Control'] = 'no-cache'
             response.set_cookie('username', username)  # Simpan username dalam cookie
@@ -80,10 +110,9 @@ def register():
         # Hash password
         hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
 
-        cursor = mysql.connection.cursor()
-        cursor.execute("INSERT INTO users (name, username, email, password, saldo, point) VALUES (%s, %s, %s, %s, %s, %s)", (name, username, email, hashed_password, 0, 0))
-        mysql.connection.commit()
-        cursor.close()
+        new_user = User(name=name, username=username, email=email, password=hashed_password)
+        db.session.add(new_user)
+        db.session.commit()
         response = jsonify({'message': 'Registration successful'})
         response.headers.add('Access-Control-Allow-Origin', '*')
         response.headers['Cache-Control'] = 'no-cache'
@@ -102,24 +131,19 @@ def logout():
 # Fungsi untuk mendapatkan data pengguna berdasarkan username
 @app.route('/api/user/<username>', methods=['GET'])
 def get_user_by_username(username):
-    cursor = mysql.connection.cursor()
-    cursor.execute("SELECT * FROM users WHERE username = %s", (username,))
-    user = cursor.fetchone()
-    cursor.close()
-    print(user)
+    user = User.query.filter_by(username=username).first()
     if user:
         user_data = {
-            'id': user[0],
-            'name': user[1],
-            'username': user[2],
-            'email': user[3],
-            'saldo': user[6],
-            'point': user[5]
+            'id': user.id,
+            'name': user.name,
+            'username': user.username,
+            'email': user.email,
+            'saldo': user.saldo,
+            'point': user.point
         }
         return jsonify({'user': user_data}), 200
     else:
         return jsonify({'error': 'User not found'}), 404
-
 
 # Endpoint untuk menambahkan quest
 @app.route('/api/quests', methods=['POST'])
@@ -129,44 +153,41 @@ def add_quest():
     
     files = request.files.getlist('file')
 
-    # Masukkan data ke database
-    cursor = mysql.connection.cursor()
-    cursor.execute("INSERT INTO quest (name, user_id, level, timeout, created_by, answer) VALUES (%s, %s, %s, %s, %s, %s)",
-                   (request.form['name'], request.form['user_id'], request.form['level'], request.form['timeout'], request.form['created_by'], request.form['answer']))
-    # cursor.execute("INSERT INTO quest (name, user_id, level, timeout, created_by, answer) VALUES (%s, %s, %s, %s, %s, %s)",
-    #                (request.form['name'], session['user_id'], request.form['level'], request.form['timeout'], request.form['created_by'], request.form['answer']))
-    quest_id = cursor.lastrowid
+    new_quest = Quest(
+        name=request.form['name'],
+        user_id=request.form['user_id'],
+        level=request.form['level'],
+        timeout=request.form['timeout'],
+        created_by=request.form['created_by'],
+        answer=request.form['answer']
+    )
+    db.session.add(new_quest)
+    db.session.commit()
+    quest_id = new_quest.id
 
     # Simpan gambar
     for file in files:
         if file and allowed_file(file.filename):
             filename = secure_filename(file.filename)
             file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
-            cursor.execute("INSERT INTO quest_images (quest_id, filename) VALUES (%s, %s)", (quest_id, filename))
+            new_image = QuestImage(quest_id=quest_id, filename=filename)
+            db.session.add(new_image)
 
-    mysql.connection.commit()
-    cursor.close()
-
+    db.session.commit()
     return jsonify({'message': 'Quest added successfully'}), 201
 
 # Fungsi untuk memperbarui nilai point pengguna berdasarkan username
 @app.route('/api/user/update_point/<username>', methods=['POST'])
 def update_user_point(username):
-    # Ambil nilai point yang baru dari body permintaan
     new_point = request.json.get('point')
 
-    # Pastikan nilai point yang diterima adalah bilangan bulat
     if not isinstance(new_point, int):
         return jsonify({'error': 'Point must be an integer'}), 400
 
-    # Lakukan pembaruan nilai point pada database
-    cursor = mysql.connection.cursor()
-    cursor.execute("UPDATE users SET point = %s WHERE username = %s", (new_point, username))
-    mysql.connection.commit()
-    cursor.close()
-
-    # Periksa apakah pembaruan berhasil
-    if cursor.rowcount > 0:
+    user = User.query.filter_by(username=username).first()
+    if user:
+        user.point = new_point
+        db.session.commit()
         return jsonify({'message': 'User point updated successfully'}), 200
     else:
         return jsonify({'error': 'User not found'}), 404
@@ -174,123 +195,141 @@ def update_user_point(username):
 # Endpoint untuk mendapatkan semua quest beserta gambar-gambar
 @app.route('/api/quests', methods=['GET'])
 def get_quests():
-    cursor = mysql.connection.cursor()
-    cursor.execute("SELECT * FROM quest")
-    quests = cursor.fetchall()
-    cursor.close()
-
+    quests = Quest.query.all()
     result = []
     for quest in quests:
-        cursor = mysql.connection.cursor()
-        cursor.execute("SELECT filename FROM quest_images WHERE quest_id = %s", (quest[0],))
-        images = cursor.fetchall()
-        cursor.close()
-
-        image_list = [image[0] for image in images]
-        print(quest)
+        images = QuestImage.query.filter_by(quest_id=quest.id).all()
+        image_list = [image.filename for image in images]
         result.append({
-            'id': quest[0],
-            'name': quest[1],
-            'level': quest[3],
-            'timeout': quest[4],
-            'created_by': quest[5],
-            'answer': quest[6],
-            'created_at': quest[7],
-            'updated_at': quest[8],
+            'id': quest.id,
+            'name': quest.name,
+            'level': quest.level,
+            'timeout': quest.timeout,
+            'created_by': quest.created_by,
+            'answer': quest.answer,
             'images': image_list
         })
-
     return jsonify(result), 200
 
+# Endpoint untuk menambahkan data played
 @app.route('/api/played', methods=['POST'])
 def add_played():
-    # Pastikan permintaan memiliki payload JSON yang sesuai
     if not request.json or 'quest_id' not in request.json or 'user_id' not in request.json:
         return jsonify({'error': 'Invalid request format'}), 400
-    
-    # Ambil data dari payload
-    quest_id = request.json['quest_id']
-    user_id = request.json['user_id']
-    answered = request.json.get('answered', None)  # Opsional, bisa kosong
-    
-    # Masukkan data ke dalam tabel played
-    cursor = mysql.connection.cursor()
-    cursor.execute("INSERT INTO played (quest_id, user_id, answered) VALUES (%s, %s, %s)",
-                   (quest_id, user_id, answered))
-    mysql.connection.commit()
-    cursor.close()
 
+    new_played = Played(
+        quest_id=request.json['quest_id'],
+        user_id=request.json['user_id'],
+        answered=request.json.get('answered', None)
+    )
+    db.session.add(new_played)
+    db.session.commit()
     return jsonify({'message': 'Data added to played table successfully'}), 201
 
+# Endpoint untuk mendapatkan data played berdasarkan ID
 @app.route('/api/played/<int:played_id>', methods=['GET'])
 def get_played_by_id(played_id):
-    # Ambil data dari tabel played berdasarkan ID
-    cursor = mysql.connection.cursor()
-    cursor.execute("SELECT * FROM played WHERE id = %s", (played_id,))
-    played_data = cursor.fetchone()
-    cursor.close()
-
-    # Jika data tidak ditemukan, kembalikan respons 404
-    if not played_data:
+    played_data = Played.query.get(played_id)
+    if played_data:
+        return jsonify({'played_data': played_data}), 200
+    else:
         return jsonify({'error': 'Data not found'}), 404
 
-    # Jika data ditemukan, kembalikan respons dengan data yang ditemukan
-    return jsonify({'played_data': played_data}), 200
-# API untuk mendapatkan daftar semua pengguna dan quest yang mereka mainkan
+# Endpoint untuk mendapatkan daftar semua pengguna dan quest yang mereka mainkan
 @app.route('/api/users', methods=['GET'])
 def get_users_with_quest():
-    cursor = mysql.connection.cursor()
-    try:
-        # Query untuk mendapatkan daftar semua pengguna beserta quest yang mereka mainkan,
-        # diurutkan berdasarkan poin pengguna secara terbalik (terbesar ke terkecil)
-        query = """
-            SELECT users.id, users.name, users.username, users.email, users.point, users.saldo, 
-                   quest.id AS quest_id, quest.name AS quest_name, quest.level, quest.timeout, quest.created_by, quest.answer
-            FROM users
-            LEFT JOIN played ON users.id = played.user_id
-            LEFT JOIN quest ON played.quest_id = quest.id
-            ORDER BY users.point DESC
-        """
-        cursor.execute(query)
-        results = cursor.fetchall()
-
-        # Mengelompokkan data pengguna dan quest yang mereka mainkan
-        users = []
-        for row in results:
-            user_id = row[0]
-            user_index = next((index for index, user in enumerate(users) if user['id'] == user_id), None)
-            if user_index is None:
-                users.append({
-                    'id': row[0],
-                    'name': row[1],
-                    'username': row[2],
-                    'email': row[3],
-                    'point': row[4],
-                    'saldo': row[5],
-                    'quests': []
+    users = User.query.order_by(User.point.desc()).all()
+    result = []
+    for user in users:
+        user_quests = Played.query.filter_by(user_id=user.id).all()
+        quests = []
+        for played in user_quests:
+            quest = Quest.query.get(played.quest_id)
+            if quest:
+                quests.append({
+                    'id': quest.id,
+                    'name': quest.name,
+                    'answered': played.answered
                 })
-                user_index = len(users) - 1
+        result.append({
+            'id': user.id,
+            'name': user.name,
+            'username': user.username,
+            'email': user.email,
+            'saldo': user.saldo,
+            'point': user.point,
+            'quests': quests
+        })
+    return jsonify(result), 200
 
-            if row[6]:  # Jika ada quest yang dimainkan oleh pengguna
-                users[user_index]['quests'].append({
-                    'id': row[6],
-                    'name': row[7],
-                    'level': row[8],
-                    'timeout': row[9],
-                    'created_by': row[10],
-                    'answer': row[11]
-                })
+# Endpoint untuk menambahkan store
+@app.route('/api/store', methods=['POST'])
+def add_store():
+    if not request.json:
+        return jsonify({'error': 'Invalid request format'}), 400
 
-        # Mengembalikan data dalam format JSON
-        return jsonify(users)
+    new_store = Store(
+        user_id=request.json['user_id'],
+        harga=request.json['harga'],
+        nama=request.json['nama'],
+        deskripsi=request.json['deskripsi'],
+        kategori=request.json['kategori']
+    )
+    db.session.add(new_store)
+    db.session.commit()
+    return jsonify({'message': 'Store added successfully'}), 201
 
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+# Endpoint untuk menambahkan transaksi
+@app.route('/api/transaction', methods=['POST'])
+def add_transaction():
+    if not request.json:
+        return jsonify({'error': 'Invalid request format'}), 400
 
+    new_transaction = Transaction(
+        store_id=request.json['store_id'],
+        user_id=request.json['user_id'],
+        status=request.json['status']
+    )
+    db.session.add(new_transaction)
+    db.session.commit()
+    return jsonify({'message': 'Transaction added successfully'}), 201
+
+# Endpoint untuk mendapatkan daftar store
+@app.route('/api/store', methods=['GET'])
+def get_store():
+    stores = Store.query.all()
+    result = []
+    for store in stores:
+        result.append({
+            'id': store.id,
+            'user_id': store.user_id,
+            'harga': store.harga,
+            'nama': store.nama,
+            'deskripsi': store.deskripsi,
+            'kategori': store.kategori
+        })
+    return jsonify(result), 200
+
+# Endpoint untuk mendapatkan daftar transaksi
+@app.route('/api/transaction', methods=['GET'])
+def get_transactions():
+    transactions = Transaction.query.all()
+    result = []
+    for transaction in transactions:
+        result.append({
+            'id': transaction.id,
+            'store_id': transaction.store_id,
+            'user_id': transaction.user_id,
+            'status': transaction.status
+        })
+    return jsonify(result), 200
+
+# Endpoint untuk mengunduh gambar berdasarkan nama file
 @app.route('/uploads/<filename>')
 def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
+# Menjalankan aplikasi
 if __name__ == '__main__':
     port_nr = int(os.environ.get("PORT", 5001))
     app.run(port=port_nr, host='0.0.0.0')
