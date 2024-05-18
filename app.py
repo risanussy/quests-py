@@ -150,7 +150,7 @@ def get_user_by_username(username):
 def add_quest():
     if 'file' not in request.files:
         return jsonify({'error': 'No file part'}), 400
-    
+
     files = request.files.getlist('file')
 
     new_quest = Quest(
